@@ -19,18 +19,39 @@ server {
     listen 80;
     server_name _;
 
+    # CORS (для Flutter Web dev): заголовки на все ответы, OPTIONS — 204
+    add_header Access-Control-Allow-Origin       "$http_origin" always;
+    add_header Access-Control-Allow-Credentials  "true" always;
+    add_header Access-Control-Allow-Methods      "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers      "Authorization, Content-Type, X-Requested-With" always;
+    add_header Access-Control-Expose-Headers     "*" always;
+    add_header Access-Control-Max-Age            86400 always;
+
+    if ($request_method = OPTIONS) {
+        return 204;
+    }
+
     # BLOCKED: internal endpoints (service-to-service only)
     location /internal/ {
         return 403 '{"error": "Forbidden", "status": 403}';
     }
 
-    # Internal: token validation subrequest (used by auth_request)
+    # Internal: token validation subrequest (used by auth_request) — for REST
     location = /_auth/validate {
         internal;
         proxy_pass http://auth_service/auth/validate;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header X-Original-URI $request_uri;
+    }
+
+    # Internal: token validation for WebSocket — token comes from $ws_auth_header (set in /ws)
+    location = /_auth/validate_ws {
+        internal;
+        proxy_pass http://auth_service/auth/validate;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Authorization $ws_auth_header;
     }
 
     # Auth Service: /api/v1/auth/* -> auth-service/auth/*
@@ -42,7 +63,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # User Service: /api/v1/profile -> user-service
+    # User Service: profile
     location /api/v1/profile {
         auth_request /_auth/validate;
         auth_request_set $user_id $upstream_http_x_user_id;
@@ -55,24 +76,35 @@ server {
         proxy_set_header X-User-Id $user_id;
     }
 
-    # Chat: contacts
-    location /api/v1/contacts {
+    # User Service: users search
+    location /api/v1/users {
         auth_request /_auth/validate;
         auth_request_set $user_id $upstream_http_x_user_id;
 
-        proxy_pass http://chat_service/contacts;
+        proxy_pass http://user_service/api/v1/users;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-User-Id $user_id;
+    }
+
+    # Chat: chats REST API
+    location /api/v1/chats {
+        auth_request /_auth/validate;
+        auth_request_set $user_id $upstream_http_x_user_id;
+
+        proxy_pass http://chat_service/chats;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-User-Id $user_id;
     }
-
-    # Chat: history
-    location /api/v1/messages/ {
+    location /api/v1/chats/ {
         auth_request /_auth/validate;
         auth_request_set $user_id $upstream_http_x_user_id;
 
-        proxy_pass http://chat_service/messages/;
+        proxy_pass http://chat_service/chats/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -81,7 +113,8 @@ server {
 
     # Chat: WebSocket
     location /ws {
-        auth_request /_auth/validate;
+        set $ws_auth_header "Bearer $arg_token";
+        auth_request /_auth/validate_ws;
         auth_request_set $user_id $upstream_http_x_user_id;
 
         proxy_pass http://chat_service;
@@ -102,4 +135,11 @@ server {
     location /health {
         return 200 '{"status": "ok"}';
     }
+
+    # Flutter Web client (SPA) — fallback for unknown paths
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
 }
+
