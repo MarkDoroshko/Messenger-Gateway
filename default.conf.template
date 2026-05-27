@@ -3,21 +3,13 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
-upstream auth_service {
-    server auth-service:8080;
-}
-
-upstream user_service {
-    server user-service:8080;
-}
-
-upstream chat_service {
-    server chat-service:8080;
-}
-
 server {
     listen 80;
     server_name _;
+
+    # Docker embedded DNS — позволяет nginx перерезолвать имена сервисов на каждый запрос
+    # (без этого после пересоздания контейнеров nginx будет ходить по устаревшим IP).
+    resolver 127.0.0.11 valid=10s ipv6=off;
 
     # CORS (для Flutter Web dev): заголовки на все ответы, OPTIONS — 204
     add_header Access-Control-Allow-Origin       "$http_origin" always;
@@ -39,7 +31,8 @@ server {
     # Internal: token validation subrequest (used by auth_request) — for REST
     location = /_auth/validate {
         internal;
-        proxy_pass http://auth_service/auth/validate;
+        set $auth_upstream auth-service;
+        proxy_pass http://$auth_upstream:8080/auth/validate;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header X-Original-URI $request_uri;
@@ -48,7 +41,8 @@ server {
     # Internal: token validation for WebSocket — token comes from $ws_auth_header (set in /ws)
     location = /_auth/validate_ws {
         internal;
-        proxy_pass http://auth_service/auth/validate;
+        set $auth_upstream auth-service;
+        proxy_pass http://$auth_upstream:8080/auth/validate;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header Authorization $ws_auth_header;
@@ -56,7 +50,9 @@ server {
 
     # Auth Service: /api/v1/auth/* -> auth-service/auth/*
     location /api/v1/auth/ {
-        proxy_pass http://auth_service/auth/;
+        set $auth_upstream auth-service;
+        rewrite ^/api/v1/auth/(.*)$ /auth/$1 break;
+        proxy_pass http://$auth_upstream:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -68,7 +64,8 @@ server {
         auth_request /_auth/validate;
         auth_request_set $user_id $upstream_http_x_user_id;
 
-        proxy_pass http://user_service/api/v1/profile;
+        set $user_upstream user-service;
+        proxy_pass http://$user_upstream:8080/api/v1/profile$is_args$args;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -81,7 +78,8 @@ server {
         auth_request /_auth/validate;
         auth_request_set $user_id $upstream_http_x_user_id;
 
-        proxy_pass http://user_service/api/v1/users;
+        set $user_upstream user-service;
+        proxy_pass http://$user_upstream:8080/api/v1/users$is_args$args;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -89,22 +87,26 @@ server {
         proxy_set_header X-User-Id $user_id;
     }
 
-    # Chat: chats REST API
-    location /api/v1/chats {
+    # Chat: chats REST API (точное совпадение /api/v1/chats без слэша)
+    location = /api/v1/chats {
         auth_request /_auth/validate;
         auth_request_set $user_id $upstream_http_x_user_id;
 
-        proxy_pass http://chat_service/chats;
+        set $chat_upstream chat-service;
+        proxy_pass http://$chat_upstream:8080/chats$is_args$args;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-User-Id $user_id;
     }
+
     location /api/v1/chats/ {
         auth_request /_auth/validate;
         auth_request_set $user_id $upstream_http_x_user_id;
 
-        proxy_pass http://chat_service/chats/;
+        set $chat_upstream chat-service;
+        rewrite ^/api/v1/chats/(.*)$ /chats/$1 break;
+        proxy_pass http://$chat_upstream:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -117,7 +119,8 @@ server {
         auth_request /_auth/validate_ws;
         auth_request_set $user_id $upstream_http_x_user_id;
 
-        proxy_pass http://chat_service;
+        set $chat_upstream chat-service;
+        proxy_pass http://$chat_upstream:8080;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -142,4 +145,3 @@ server {
         try_files $uri $uri/ /index.html;
     }
 }
-
